@@ -58,8 +58,17 @@ func main() {
 
 		// 启动TCP代理服务
 		log.Fatal(startTCPProxy(*port, targetAddr))
+	} else if strings.HasPrefix(*target, "udp://") {
+		// UDP代理
+		targetAddr := strings.TrimPrefix(*target, "udp://")
+
+		log.Printf("UDP转发服务已启动，监听端口: %s\n", *port)
+		log.Printf("所有UDP流量将转发到: %s\n", targetAddr)
+
+		// 启动UDP代理服务
+		log.Fatal(startUDPProxy(*port, targetAddr))
 	} else {
-		log.Fatal("不支持的目标地址协议，请使用 http://, https:// 或 tcp:// 前缀")
+		log.Fatal("不支持的目标地址协议，请使用 http://, https://, tcp:// 或 udp:// 前缀")
 	}
 }
 
@@ -119,5 +128,93 @@ func transferData(dst io.Writer, src io.Reader) {
 	_, err := io.Copy(dst, src)
 	if err != nil {
 		log.Printf("数据传输错误: %v", err)
+	}
+}
+
+// startUDPProxy 启动UDP代理服务
+func startUDPProxy(listenPort, targetAddr string) error {
+	// 创建UDP监听
+	listenAddr, err := net.ResolveUDPAddr("udp", ":"+listenPort)
+	if err != nil {
+		return err
+	}
+
+	conn, err := net.ListenUDP("udp", listenAddr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	log.Printf("UDP代理监听在端口 %s\n", listenPort)
+
+	// 用于存储客户端地址和对应的目标连接映射
+	connections := make(map[string]*net.UDPConn)
+	mutex := sync.RWMutex{}
+
+	buf := make([]byte, 65535) // UDP最大包大小
+
+	for {
+		n, clientAddr, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			log.Printf("读取UDP数据失败: %v", err)
+			continue
+		}
+
+		// 查找或创建到目标服务器的连接
+		mutex.RLock()
+		serverConn, exists := connections[clientAddr.String()]
+		mutex.RUnlock()
+
+		if !exists {
+			// 创建到目标服务器的新连接
+			serverAddr, err := net.ResolveUDPAddr("udp", targetAddr)
+			if err != nil {
+				log.Printf("解析目标地址失败 %s: %v", targetAddr, err)
+				continue
+			}
+
+			serverConn, err = net.DialUDP("udp", nil, serverAddr)
+			if err != nil {
+				log.Printf("连接到目标服务器失败 %s: %v", targetAddr, err)
+				continue
+			}
+
+			mutex.Lock()
+			connections[clientAddr.String()] = serverConn
+			mutex.Unlock()
+
+			// 启动从服务器到客户端的数据传输
+			go func(clientAddr *net.UDPAddr, serverConn *net.UDPConn) {
+				serverBuf := make([]byte, 65535)
+				for {
+					n, err := serverConn.Read(serverBuf)
+					if err != nil {
+						break
+					}
+
+					_, err = conn.WriteToUDP(serverBuf[:n], clientAddr)
+					if err != nil {
+						log.Printf("向客户端写入数据失败: %v", err)
+						break
+					}
+				}
+
+				// 清理连接
+				mutex.Lock()
+				delete(connections, clientAddr.String())
+				mutex.Unlock()
+				serverConn.Close()
+			}(clientAddr, serverConn)
+		}
+
+		// 将数据转发到目标服务器
+		_, err = serverConn.Write(buf[:n])
+		if err != nil {
+			log.Printf("向目标服务器写入数据失败: %v", err)
+			mutex.Lock()
+			delete(connections, clientAddr.String())
+			mutex.Unlock()
+			serverConn.Close()
+		}
 	}
 }
