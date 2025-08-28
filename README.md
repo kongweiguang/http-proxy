@@ -3,7 +3,9 @@ http反向代理
 
 ## use
 ```shell
-.\http-proxy.exe -port=8888 -target=http://localhost:8003
+.\http-proxy.exe -port=8888 -target=http://localhost:8080
+.\http-proxy.exe -port 8888 -target tcp://localhost:3306
+.\http-proxy.exe -port 8888 -target udp://localhost:8899
 ```
 
 
